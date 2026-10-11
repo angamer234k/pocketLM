@@ -9,7 +9,6 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import com.angamer.pocketlm.R
 import fi.iki.elonen.NanoHTTPD
 import java.io.IOException
 
@@ -73,7 +72,7 @@ class LlmServerService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("pocketLM")
             .setContentText("Serving on port $port")
-            .setSmallIcon(android.R.drawable.ic_menu_manage) // placeholder
+            .setSmallIcon(android.R.drawable.ic_menu_manage)
             .setOngoing(true)
             .build()
     }
@@ -83,7 +82,6 @@ class LlmServerService : Service() {
         super.onDestroy()
     }
 
-    // Minimal OpenAI-compatible stub
     private class PocketHttpServer(port: Int) : NanoHTTPD(port) {
         override fun serve(session: IHTTPSession): Response {
             val uri = session.uri
@@ -108,7 +106,6 @@ class LlmServerService : Service() {
                 }
 
                 uri == "/v1/chat/completions" && method == Method.POST -> {
-                    // TODO: parse body, call llama.cpp, stream response
                     val body = """
                     {
                       "id": "chatcmpl-stub",
