@@ -54,6 +54,13 @@ class MainActivity : ComponentActivity() {
                                 action = LlmServerService.ACTION_STOP
                             }
                             startService(intent)
+                        },
+                        onLoadModel = { path ->
+                            val intent = Intent(this, LlmServerService::class.java).apply {
+                                action = LlmServerService.ACTION_LOAD_MODEL
+                                putExtra(LlmServerService.EXTRA_MODEL_PATH, path)
+                            }
+                            startService(intent)
                         }
                     )
                 }
@@ -65,11 +72,14 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun MainScreen(
     onStartServer: (Int) -> Unit,
-    onStopServer: () -> Unit
+    onStopServer: () -> Unit,
+    onLoadModel: (String) -> Unit
 ) {
     var port by remember { mutableStateOf("9090") }
+    var modelPath by remember { mutableStateOf("/sdcard/Download/model.gguf") }
     var serverRunning by remember { mutableStateOf(false) }
     var nativeStatus by remember { mutableStateOf("checking...") }
+    var modelStatus by remember { mutableStateOf("no model") }
 
     LaunchedEffect(Unit) {
         nativeStatus = try {
@@ -77,19 +87,20 @@ fun MainScreen(
         } catch (e: Exception) {
             "native load failed: ${e.message}"
         }
+        modelStatus = if (LlamaBridge.isLoaded()) "model loaded" else "no model"
     }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(24.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(text = "pocketLM", style = MaterialTheme.typography.headlineMedium)
         Text(text = "on-device LLM server", style = MaterialTheme.typography.bodyMedium)
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(4.dp))
 
         OutlinedTextField(
             value = port,
@@ -99,7 +110,34 @@ fun MainScreen(
             modifier = Modifier.fillMaxWidth()
         )
 
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        OutlinedTextField(
+            value = modelPath,
+            onValueChange = { modelPath = it },
+            label = { Text("GGUF path") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = {
+                    onLoadModel(modelPath.trim())
+                    modelStatus = "loading..."
+                }
+            ) {
+                Text("Load Model")
+            }
+            OutlinedButton(
+                onClick = {
+                    LlamaBridge.unloadModel()
+                    modelStatus = "no model"
+                }
+            ) {
+                Text("Unload")
+            }
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
                 onClick = {
                     val p = port.toIntOrNull() ?: 9090
@@ -117,24 +155,21 @@ fun MainScreen(
                 },
                 enabled = serverRunning
             ) {
-                Text("Stop")
+                Text("Stop Server")
             }
         }
 
         Text(
-            text = if (serverRunning) "Server running on :$port" else "Server stopped",
+            text = if (serverRunning) "Server :$port" else "Server stopped",
             style = MaterialTheme.typography.bodyLarge
         )
-
-        Spacer(modifier = Modifier.height(24.dp))
-
-        Text(text = "Native status:", style = MaterialTheme.typography.labelMedium)
+        Text(text = "Model: $modelStatus", style = MaterialTheme.typography.bodyMedium)
         Text(text = nativeStatus, style = MaterialTheme.typography.bodySmall)
 
         Spacer(modifier = Modifier.weight(1f))
 
         Text(
-            text = "llama.cpp integration next\nAPI keys + OpenAI endpoints coming",
+            text = "Put a .gguf on the phone, set path, Load, then Start Server.\ncurl http://PHONE_IP:PORT/v1/chat/completions",
             style = MaterialTheme.typography.bodySmall
         )
     }

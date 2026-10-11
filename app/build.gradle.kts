@@ -12,8 +12,8 @@ android {
         applicationId = "com.angamer.pocketlm"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -23,8 +23,12 @@ android {
 
         externalNativeBuild {
             cmake {
-                cppFlags += "-std=c++17"
-                arguments += listOf("-DANDROID_STL=c++_shared")
+                cppFlags += listOf("-std=c++17", "-O3")
+                arguments += listOf(
+                    "-DANDROID_STL=c++_shared",
+                    "-DGGML_NATIVE=OFF",
+                    "-DGGML_OPENMP=OFF"
+                )
             }
         }
     }
@@ -58,6 +62,12 @@ android {
             version = "3.22.1"
         }
     }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
 }
 
 dependencies {
@@ -72,13 +82,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
 
-    // HTTP server (simple for now, can swap to Ktor later)
     implementation("org.nanohttpd:nanohttpd:2.3.1")
-
-    // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
-
-    // DataStore for API keys / settings
     implementation("androidx.datastore:datastore-preferences:1.1.1")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
