@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <mutex>
+#include <atomic>
 #include <android/log.h>
 
 #include "llama.h"
@@ -14,6 +15,7 @@ static std::mutex g_mutex;
 static llama_model * g_model = nullptr;
 static llama_context * g_ctx = nullptr;
 static int g_n_threads = 4;
+static std::atomic<bool> g_abort{false};
 
 static void free_model_locked() {
     if (g_ctx) {
@@ -37,13 +39,14 @@ Java_com_angamer_pocketlm_native_LlamaBridge_nativeLoadModel(
 
     std::lock_guard<std::mutex> lock(g_mutex);
     free_model_locked();
+    g_abort = false;
 
     g_n_threads = n_threads > 0 ? n_threads : 4;
 
     llama_backend_init();
 
     llama_model_params mparams = llama_model_default_params();
-    mparams.n_gpu_layers = 0; // CPU for now; GPU later
+    mparams.n_gpu_layers = 0;
 
     g_model = llama_model_load_from_file(path, mparams);
     env->ReleaseStringUTFChars(path_, path);
@@ -72,6 +75,7 @@ Java_com_angamer_pocketlm_native_LlamaBridge_nativeLoadModel(
 
 JNIEXPORT void JNICALL
 Java_com_angamer_pocketlm_native_LlamaBridge_nativeUnloadModel(JNIEnv *, jobject) {
+    g_abort = true;
     std::lock_guard<std::mutex> lock(g_mutex);
     free_model_locked();
     llama_backend_free();
@@ -84,17 +88,21 @@ Java_com_angamer_pocketlm_native_LlamaBridge_nativeIsLoaded(JNIEnv *, jobject) {
     return g_model && g_ctx ? JNI_TRUE : JNI_FALSE;
 }
 
+JNIEXPORT void JNICALL
+Java_com_angamer_pocketlm_native_LlamaBridge_nativeAbort(JNIEnv *, jobject) {
+    g_abort = true;
+}
+
 JNIEXPORT jstring JNICALL
 Java_com_angamer_pocketlm_native_LlamaBridge_nativeComplete(
         JNIEnv *env, jobject /*thiz*/,
         jstring prompt_, jint max_tokens, jfloat temperature) {
 
     const char * prompt = env->GetStringUTFChars(prompt_, nullptr);
-    if (!prompt) {
-        return env->NewStringUTF("");
-    }
+    if (!prompt) return env->NewStringUTF("");
 
     std::lock_guard<std::mutex> lock(g_mutex);
+    g_abort = false;
 
     if (!g_model || !g_ctx) {
         env->ReleaseStringUTFChars(prompt_, prompt);
@@ -103,9 +111,8 @@ Java_com_angamer_pocketlm_native_LlamaBridge_nativeComplete(
 
     const llama_vocab * vocab = llama_model_get_vocab(g_model);
 
-    // tokenize
     std::vector<llama_token> tokens;
-    tokens.resize(prompt ? strlen(prompt) + 8 : 8);
+    tokens.resize(strlen(prompt) + 8);
     int n = llama_tokenize(vocab, prompt, (int)strlen(prompt), tokens.data(), (int)tokens.size(), true, true);
     if (n < 0) {
         tokens.resize(-n);
@@ -113,22 +120,18 @@ Java_com_angamer_pocketlm_native_LlamaBridge_nativeComplete(
     }
     env->ReleaseStringUTFChars(prompt_, prompt);
 
-    if (n < 0) {
-        return env->NewStringUTF("[error] tokenize failed");
-    }
+    if (n < 0) return env->NewStringUTF("[error] tokenize failed");
     tokens.resize(n);
 
     llama_memory_clear(llama_get_memory(g_ctx), true);
 
-    // eval prompt
-    for (int i = 0; i < n; i += 1) {
+    for (int i = 0; i < n; i++) {
         llama_batch batch = llama_batch_get_one(&tokens[i], 1);
         if (llama_decode(g_ctx, batch) != 0) {
             return env->NewStringUTF("[error] decode prompt failed");
         }
     }
 
-    // sampler
     auto sparams = llama_sampler_chain_default_params();
     llama_sampler * smpl = llama_sampler_chain_init(sparams);
     llama_sampler_chain_add(smpl, llama_sampler_init_temp(temperature > 0 ? temperature : 0.7f));
@@ -137,14 +140,119 @@ Java_com_angamer_pocketlm_native_LlamaBridge_nativeComplete(
     std::string out;
     const int max_gen = max_tokens > 0 ? max_tokens : 256;
 
-    for (int i = 0; i < max_gen; i++) {
+    for (int i = 0; i < max_gen && !g_abort; i++) {
+        llama_token id = llama_sampler_sample(smpl, g_ctx, -1);
+        if (llama_vocab_is_eog(vocab, id)) break;
+
+        char buf[256];
+        int n_chars = llama_token_to_piece(vocab, id, buf, sizeof(buf), 0, true);
+        if (n_chars > 0) out.append(buf, n_chars);
+
+        llama_batch batch = llama_batch_get_one(&id, 1);
+        if (llama_decode(g_ctx, batch) != 0) break;
+    }
+
+    llama_sampler_free(smpl);
+    return env->NewStringUTF(out.c_str());
+}
+
+// Streaming: calls TokenCallback.onToken(String) for each piece, then onDone()
+JNIEXPORT void JNICALL
+Java_com_angamer_pocketlm_native_LlamaBridge_nativeCompleteStream(
+        JNIEnv *env, jobject /*thiz*/,
+        jstring prompt_, jint max_tokens, jfloat temperature,
+        jobject callback) {
+
+    jclass cbClass = env->GetObjectClass(callback);
+    jmethodID onToken = env->GetMethodID(cbClass, "onToken", "(Ljava/lang/String;)V");
+    jmethodID onDone = env->GetMethodID(cbClass, "onDone", "()V");
+    jmethodID onError = env->GetMethodID(cbClass, "onError", "(Ljava/lang/String;)V");
+
+    if (!onToken || !onDone) {
+        LOGE("callback methods missing");
+        return;
+    }
+
+    const char * prompt = env->GetStringUTFChars(prompt_, nullptr);
+    if (!prompt) {
+        if (onError) {
+            jstring err = env->NewStringUTF("empty prompt");
+            env->CallVoidMethod(callback, onError, err);
+            env->DeleteLocalRef(err);
+        }
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_abort = false;
+
+    if (!g_model || !g_ctx) {
+        env->ReleaseStringUTFChars(prompt_, prompt);
+        if (onError) {
+            jstring err = env->NewStringUTF("no model loaded");
+            env->CallVoidMethod(callback, onError, err);
+            env->DeleteLocalRef(err);
+        }
+        return;
+    }
+
+    const llama_vocab * vocab = llama_model_get_vocab(g_model);
+
+    std::vector<llama_token> tokens;
+    tokens.resize(strlen(prompt) + 8);
+    int n = llama_tokenize(vocab, prompt, (int)strlen(prompt), tokens.data(), (int)tokens.size(), true, true);
+    if (n < 0) {
+        tokens.resize(-n);
+        n = llama_tokenize(vocab, prompt, (int)strlen(prompt), tokens.data(), (int)tokens.size(), true, true);
+    }
+    env->ReleaseStringUTFChars(prompt_, prompt);
+
+    if (n < 0) {
+        if (onError) {
+            jstring err = env->NewStringUTF("tokenize failed");
+            env->CallVoidMethod(callback, onError, err);
+            env->DeleteLocalRef(err);
+        }
+        return;
+    }
+    tokens.resize(n);
+
+    llama_memory_clear(llama_get_memory(g_ctx), true);
+
+    for (int i = 0; i < n; i++) {
+        llama_batch batch = llama_batch_get_one(&tokens[i], 1);
+        if (llama_decode(g_ctx, batch) != 0) {
+            if (onError) {
+                jstring err = env->NewStringUTF("decode prompt failed");
+                env->CallVoidMethod(callback, onError, err);
+                env->DeleteLocalRef(err);
+            }
+            return;
+        }
+    }
+
+    auto sparams = llama_sampler_chain_default_params();
+    llama_sampler * smpl = llama_sampler_chain_init(sparams);
+    llama_sampler_chain_add(smpl, llama_sampler_init_temp(temperature > 0 ? temperature : 0.7f));
+    llama_sampler_chain_add(smpl, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
+
+    const int max_gen = max_tokens > 0 ? max_tokens : 256;
+
+    for (int i = 0; i < max_gen && !g_abort; i++) {
         llama_token id = llama_sampler_sample(smpl, g_ctx, -1);
         if (llama_vocab_is_eog(vocab, id)) break;
 
         char buf[256];
         int n_chars = llama_token_to_piece(vocab, id, buf, sizeof(buf), 0, true);
         if (n_chars > 0) {
-            out.append(buf, n_chars);
+            std::string piece(buf, n_chars);
+            jstring jpiece = env->NewStringUTF(piece.c_str());
+            env->CallVoidMethod(callback, onToken, jpiece);
+            env->DeleteLocalRef(jpiece);
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                break;
+            }
         }
 
         llama_batch batch = llama_batch_get_one(&id, 1);
@@ -152,8 +260,7 @@ Java_com_angamer_pocketlm_native_LlamaBridge_nativeComplete(
     }
 
     llama_sampler_free(smpl);
-
-    return env->NewStringUTF(out.c_str());
+    env->CallVoidMethod(callback, onDone);
 }
 
 JNIEXPORT jstring JNICALL
