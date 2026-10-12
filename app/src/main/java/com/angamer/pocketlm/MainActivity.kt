@@ -21,9 +21,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -38,11 +39,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.angamer.pocketlm.model.CatalogModel
+import com.angamer.pocketlm.model.ModelCatalog
+import com.angamer.pocketlm.model.ModelDownloader
 import com.angamer.pocketlm.native.LlamaBridge
 import com.angamer.pocketlm.server.LlmServerService
 import com.angamer.pocketlm.ui.theme.PocketLMTheme
@@ -56,8 +59,6 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-
-        // ensure models dir exists
         File(filesDir, "models").mkdirs()
 
         setContent {
@@ -72,17 +73,19 @@ class MainActivity : ComponentActivity() {
                             ContextCompat.startForegroundService(this, intent)
                         },
                         onStopServer = {
-                            val intent = Intent(this, LlmServerService::class.java).apply {
-                                action = LlmServerService.ACTION_STOP
-                            }
-                            startService(intent)
+                            startService(
+                                Intent(this, LlmServerService::class.java).apply {
+                                    action = LlmServerService.ACTION_STOP
+                                }
+                            )
                         },
                         onLoadModel = { path ->
-                            val intent = Intent(this, LlmServerService::class.java).apply {
-                                action = LlmServerService.ACTION_LOAD_MODEL
-                                putExtra(LlmServerService.EXTRA_MODEL_PATH, path)
-                            }
-                            startService(intent)
+                            startService(
+                                Intent(this, LlmServerService::class.java).apply {
+                                    action = LlmServerService.ACTION_LOAD_MODEL
+                                    putExtra(LlmServerService.EXTRA_MODEL_PATH, path)
+                                }
+                            )
                         }
                     )
                 }
@@ -101,23 +104,80 @@ fun MainScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val modelsDir = remember { File(context.filesDir, "models") }
 
     var port by remember { mutableStateOf("9090") }
     var serverRunning by remember { mutableStateOf(false) }
     var nativeStatus by remember { mutableStateOf("checking...") }
     var modelStatus by remember { mutableStateOf("no model") }
     var models by remember { mutableStateOf<List<ModelEntry>>(emptyList()) }
-    var importing by remember { mutableStateOf(false) }
-    var importProgress by remember { mutableFloatStateOf(0f) }
+
+    var busy by remember { mutableStateOf(false) }
+    var busyLabel by remember { mutableStateOf("") }
+    var progress by remember { mutableFloatStateOf(0f) }
     var selectedPath by remember { mutableStateOf<String?>(null) }
 
+    var customUrl by remember { mutableStateOf("") }
+    var showCatalog by remember { mutableStateOf(true) }
+
     fun refreshModels() {
-        val dir = File(context.filesDir, "models")
-        models = dir.listFiles()
+        models = modelsDir.listFiles()
             ?.filter { it.isFile && it.name.endsWith(".gguf", ignoreCase = true) }
             ?.map { ModelEntry(it.name, it.absolutePath, it.length() / (1024 * 1024)) }
             ?.sortedBy { it.name }
             ?: emptyList()
+    }
+
+    fun isDownloaded(filename: String): Boolean =
+        File(modelsDir, filename).exists()
+
+    fun loadPath(path: String, name: String) {
+        selectedPath = path
+        modelStatus = "loading $name…"
+        onLoadModel(path)
+        scope.launch {
+            repeat(60) {
+                kotlinx.coroutines.delay(500)
+                if (LlamaBridge.isLoaded()) {
+                    modelStatus = name
+                    return@launch
+                }
+            }
+            modelStatus = if (LlamaBridge.isLoaded()) name else "load failed / still loading"
+        }
+    }
+
+    fun downloadUrl(url: String, filename: String) {
+        if (busy) return
+        scope.launch {
+            busy = true
+            busyLabel = "Downloading $filename"
+            progress = 0f
+            try {
+                val dest = File(modelsDir, filename)
+                withContext(Dispatchers.IO) {
+                    ModelDownloader.download(url, dest) { p ->
+                        progress = if (p < 0) progress else p
+                    }
+                }
+                refreshModels()
+                Toast.makeText(context, "Downloaded $filename", Toast.LENGTH_SHORT).show()
+                loadPath(dest.absolutePath, filename)
+            } catch (e: Exception) {
+                Toast.makeText(context, "Download failed: ${e.message}", Toast.LENGTH_LONG).show()
+            } finally {
+                busy = false
+                busyLabel = ""
+            }
+        }
+    }
+
+    fun downloadCatalog(m: CatalogModel) {
+        if (isDownloaded(m.filename)) {
+            loadPath(File(modelsDir, m.filename).absolutePath, m.filename)
+            return
+        }
+        downloadUrl(m.url, m.filename)
     }
 
     LaunchedEffect(Unit) {
@@ -135,36 +195,36 @@ fun MainScreen(
     ) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
         scope.launch {
-            importing = true
-            importProgress = 0f
+            busy = true
+            busyLabel = "Importing…"
+            progress = 0f
             try {
                 val name = queryDisplayName(context, uri) ?: "model.gguf"
                 val safeName = if (name.endsWith(".gguf", true)) name else "$name.gguf"
-                val dest = File(File(context.filesDir, "models"), safeName)
+                val dest = File(modelsDir, safeName)
                 withContext(Dispatchers.IO) {
                     context.contentResolver.openInputStream(uri)?.use { input ->
                         val total = context.contentResolver.openFileDescriptor(uri, "r")?.statSize ?: -1L
                         FileOutputStream(dest).use { output ->
-                            val buf = ByteArray(1024 * 256)
+                            val buf = ByteArray(256 * 1024)
                             var copied = 0L
                             var n: Int
                             while (input.read(buf).also { n = it } >= 0) {
                                 output.write(buf, 0, n)
                                 copied += n
-                                if (total > 0) {
-                                    importProgress = (copied.toFloat() / total).coerceIn(0f, 1f)
-                                }
+                                if (total > 0) progress = (copied.toFloat() / total).coerceIn(0f, 1f)
                             }
                         }
-                    } ?: throw IllegalStateException("cannot open uri")
+                    } ?: error("cannot open file")
                 }
                 refreshModels()
-                selectedPath = dest.absolutePath
                 Toast.makeText(context, "Imported $safeName", Toast.LENGTH_SHORT).show()
+                loadPath(dest.absolutePath, safeName)
             } catch (e: Exception) {
                 Toast.makeText(context, "Import failed: ${e.message}", Toast.LENGTH_LONG).show()
             } finally {
-                importing = false
+                busy = false
+                busyLabel = ""
             }
         }
     }
@@ -172,12 +232,14 @@ fun MainScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(20.dp),
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Text(text = "pocketLM", style = MaterialTheme.typography.headlineMedium)
-        Text(text = "on-device LLM server", style = MaterialTheme.typography.bodyMedium)
+        Text("pocketLM", style = MaterialTheme.typography.headlineMedium)
+        Text("on-device LLM server", style = MaterialTheme.typography.bodyMedium)
 
+        // —— server ——
         OutlinedTextField(
             value = port,
             onValueChange = { port = it.filter { c -> c.isDigit() } },
@@ -185,12 +247,10 @@ fun MainScreen(
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
-
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
                 onClick = {
-                    val p = port.toIntOrNull() ?: 9090
-                    onStartServer(p)
+                    onStartServer(port.toIntOrNull() ?: 9090)
                     serverRunning = true
                 },
                 enabled = !serverRunning
@@ -203,20 +263,87 @@ fun MainScreen(
                 enabled = serverRunning
             ) { Text("Stop") }
         }
-
         Text(
-            text = if (serverRunning) "Server :$port · model: $modelStatus" else "Server stopped · $modelStatus",
+            if (serverRunning) "Server :$port · $modelStatus" else "Stopped · $modelStatus",
             style = MaterialTheme.typography.bodyMedium
         )
 
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(text = "Models", style = MaterialTheme.typography.titleMedium)
+        // —— download online ——
+        Text("Download online", style = MaterialTheme.typography.titleMedium)
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(
+            OutlinedButton(onClick = { showCatalog = !showCatalog }) {
+                Text(if (showCatalog) "Hide catalog" else "Show catalog")
+            }
+            OutlinedButton(
                 onClick = { picker.launch(arrayOf("*/*", "application/octet-stream")) },
-                enabled = !importing
-            ) { Text("Import GGUF") }
+                enabled = !busy
+            ) { Text("Import file") }
+        }
+
+        if (showCatalog) {
+            ModelCatalog.models.forEach { m ->
+                val have = isDownloaded(m.filename)
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = !busy) { downloadCatalog(m) }
+                ) {
+                    Column(Modifier = Modifier.padding(12.dp)) {
+                        Text(m.name, style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "${m.sizeLabel}" +
+                                (if (m.note.isNotBlank()) " · ${m.note}" else "") +
+                                (if (have) " · downloaded" else ""),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Text(
+                            if (have) "tap to load" else "tap to download + load",
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
+            }
+        }
+
+        OutlinedTextField(
+            value = customUrl,
+            onValueChange = { customUrl = it },
+            label = { Text("Custom GGUF URL (HF resolve link)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !busy
+        )
+        Button(
+            onClick = {
+                val url = customUrl.trim()
+                if (url.isEmpty()) {
+                    Toast.makeText(context, "paste a URL first", Toast.LENGTH_SHORT).show()
+                    return@Button
+                }
+                val filename = url.substringAfterLast('/').substringBefore('?')
+                    .ifBlank { "model.gguf" }
+                    .let { if (it.endsWith(".gguf", true)) it else "$it.gguf" }
+                downloadUrl(url, filename)
+            },
+            enabled = !busy && customUrl.isNotBlank(),
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("Download URL") }
+
+        if (busy) {
+            LinearProgressIndicator(
+                progress = { progress.coerceIn(0f, 1f) },
+                modifier = Modifier.fillMaxWidth()
+            )
+            Text(
+                "$busyLabel · ${(progress * 100).toInt().coerceIn(0, 100)}%",
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+
+        // —— installed ——
+        Text("Installed models", style = MaterialTheme.typography.titleMedium)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = { refreshModels() }) { Text("Refresh") }
             OutlinedButton(
                 onClick = {
@@ -228,68 +355,33 @@ fun MainScreen(
             ) { Text("Unload") }
         }
 
-        if (importing) {
-            LinearProgressIndicator(
-                progress = { importProgress },
-                modifier = Modifier.fillMaxWidth()
-            )
-            Text(text = "Importing… ${(importProgress * 100).toInt()}%", style = MaterialTheme.typography.bodySmall)
-        }
-
         if (models.isEmpty()) {
             Text(
-                text = "No models yet. Import a .gguf (start small, ~0.5–1B Q4).",
+                "None yet — grab one from the catalog above.",
                 style = MaterialTheme.typography.bodySmall
             )
         } else {
-            LazyColumn(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                items(models, key = { it.path }) { m ->
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                selectedPath = m.path
-                                modelStatus = "loading ${m.name}…"
-                                onLoadModel(m.path)
-                                // optimistic; real status after load finishes is approximate
-                                scope.launch {
-                                    kotlinx.coroutines.delay(500)
-                                    // poll a bit
-                                    repeat(30) {
-                                        if (LlamaBridge.isLoaded()) {
-                                            modelStatus = m.name
-                                            return@launch
-                                        }
-                                        kotlinx.coroutines.delay(500)
-                                    }
-                                    modelStatus = if (LlamaBridge.isLoaded()) m.name else "load failed"
-                                }
-                            }
-                    ) {
-                        Column(Modifier = Modifier.padding(12.dp)) {
-                            Text(text = m.name, style = MaterialTheme.typography.bodyLarge)
-                            Text(
-                                text = "${m.sizeMb} MB" + if (selectedPath == m.path) " · selected" else "",
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        }
+            models.forEach { m ->
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = !busy) { loadPath(m.path, m.name) }
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(m.name, style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "${m.sizeMb} MB" + if (selectedPath == m.path) " · selected" else "",
+                            style = MaterialTheme.typography.bodySmall
+                        )
                     }
                 }
             }
         }
 
-        if (models.isEmpty()) {
-            Spacer(modifier = Modifier.weight(1f))
-        }
-
-        Text(text = nativeStatus, style = MaterialTheme.typography.bodySmall)
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(nativeStatus, style = MaterialTheme.typography.bodySmall)
         Text(
-            text = "API: POST /v1/chat/completions  (stream: true for SSE)",
+            "API: POST /v1/chat/completions  (\"stream\": true for SSE)",
             style = MaterialTheme.typography.bodySmall
         )
     }
@@ -298,9 +390,7 @@ fun MainScreen(
 private fun queryDisplayName(context: android.content.Context, uri: Uri): String? {
     context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
         val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-        if (idx >= 0 && cursor.moveToFirst()) {
-            return cursor.getString(idx)
-        }
+        if (idx >= 0 && cursor.moveToFirst()) return cursor.getString(idx)
     }
     return uri.lastPathSegment
 }
