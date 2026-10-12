@@ -7,6 +7,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: assembleDebug
@@ -46,6 +49,18 @@ jobs:
           name: pocketlm-debug-apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+
+      - name: Publish latest release APK
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: pocketLM latest
+          prerelease: true
+          make_latest: true
+          body: |
+            Sideload build. versionCode lives in latest.json.
+          files: app/build/outputs/apk/debug/*.apk
 
       - name: Summarize
         if: always()
