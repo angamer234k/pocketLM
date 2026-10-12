@@ -1,7 +1,20 @@
+import java.util.Base64
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+val keystoreDir = rootProject.file("keystore")
+val keystoreB64 = keystoreDir.resolve("pocketlm-debug.p12.b64")
+val keystoreFile = keystoreDir.resolve("pocketlm-debug.p12")
+if (keystoreB64.exists()) {
+    val bytes = Base64.getDecoder().decode(keystoreB64.readText().replace(Regex("\\s"), ""))
+    if (!keystoreFile.exists() || keystoreFile.length() != bytes.size.toLong()) {
+        keystoreDir.mkdirs()
+        keystoreFile.writeBytes(bytes)
+    }
 }
 
 android {
@@ -12,8 +25,8 @@ android {
         applicationId = "com.angamer.pocketlm"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 4
+        versionName = "0.4.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -33,8 +46,21 @@ android {
         }
     }
 
+    signingConfigs {
+        create("pocketlm") {
+            storeFile = keystoreFile
+            storePassword = "pocketlm"
+            keyAlias = "pocketlm"
+            keyPassword = "pocketlm"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("pocketlm")
+        }
         release {
+            signingConfig = signingConfigs.getByName("pocketlm")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -79,6 +105,7 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
 
