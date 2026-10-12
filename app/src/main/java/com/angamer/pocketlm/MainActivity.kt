@@ -19,8 +19,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -50,6 +48,7 @@ import com.angamer.pocketlm.native.LlamaBridge
 import com.angamer.pocketlm.server.LlmServerService
 import com.angamer.pocketlm.ui.theme.PocketLMTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -65,10 +64,10 @@ class MainActivity : ComponentActivity() {
             PocketLMTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     MainScreen(
-                        onStartServer = { port ->
+                        onStartServer = { p ->
                             val intent = Intent(this, LlmServerService::class.java).apply {
                                 action = LlmServerService.ACTION_START
-                                putExtra(LlmServerService.EXTRA_PORT, port)
+                                putExtra(LlmServerService.EXTRA_PORT, p)
                             }
                             ContextCompat.startForegroundService(this, intent)
                         },
@@ -137,7 +136,7 @@ fun MainScreen(
         onLoadModel(path)
         scope.launch {
             repeat(60) {
-                kotlinx.coroutines.delay(500)
+                delay(500)
                 if (LlamaBridge.isLoaded()) {
                     modelStatus = name
                     return@launch
@@ -157,7 +156,7 @@ fun MainScreen(
                 val dest = File(modelsDir, filename)
                 withContext(Dispatchers.IO) {
                     ModelDownloader.download(url, dest) { p ->
-                        progress = if (p < 0) progress else p
+                        if (p >= 0f) progress = p
                     }
                 }
                 refreshModels()
@@ -236,10 +235,9 @@ fun MainScreen(
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Text("pocketLM", style = MaterialTheme.typography.headlineMedium)
-        Text("on-device LLM server", style = MaterialTheme.typography.bodyMedium)
+        Text(text = "pocketLM", style = MaterialTheme.typography.headlineMedium)
+        Text(text = "on-device LLM server", style = MaterialTheme.typography.bodyMedium)
 
-        // —— server ——
         OutlinedTextField(
             value = port,
             onValueChange = { port = it.filter { c -> c.isDigit() } },
@@ -247,6 +245,7 @@ fun MainScreen(
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
+
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
                 onClick = {
@@ -263,13 +262,13 @@ fun MainScreen(
                 enabled = serverRunning
             ) { Text("Stop") }
         }
+
         Text(
-            if (serverRunning) "Server :$port · $modelStatus" else "Stopped · $modelStatus",
+            text = if (serverRunning) "Server :$port · $modelStatus" else "Stopped · $modelStatus",
             style = MaterialTheme.typography.bodyMedium
         )
 
-        // —— download online ——
-        Text("Download online", style = MaterialTheme.typography.titleMedium)
+        Text(text = "Download online", style = MaterialTheme.typography.titleMedium)
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = { showCatalog = !showCatalog }) {
@@ -282,27 +281,13 @@ fun MainScreen(
         }
 
         if (showCatalog) {
-            ModelCatalog.models.forEach { m ->
-                val have = isDownloaded(m.filename)
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable(enabled = !busy) { downloadCatalog(m) }
-                ) {
-                    Column(Modifier = Modifier.padding(12.dp)) {
-                        Text(m.name, style = MaterialTheme.typography.bodyLarge)
-                        Text(
-                            "${m.sizeLabel}" +
-                                (if (m.note.isNotBlank()) " · ${m.note}" else "") +
-                                (if (have) " · downloaded" else ""),
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                        Text(
-                            if (have) "tap to load" else "tap to download + load",
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                    }
-                }
+            for (m in ModelCatalog.models) {
+                CatalogCard(
+                    model = m,
+                    downloaded = isDownloaded(m.filename),
+                    enabled = !busy,
+                    onClick = { downloadCatalog(m) }
+                )
             }
         }
 
@@ -314,6 +299,7 @@ fun MainScreen(
             modifier = Modifier.fillMaxWidth(),
             enabled = !busy
         )
+
         Button(
             onClick = {
                 val url = customUrl.trim()
@@ -336,13 +322,13 @@ fun MainScreen(
                 modifier = Modifier.fillMaxWidth()
             )
             Text(
-                "$busyLabel · ${(progress * 100).toInt().coerceIn(0, 100)}%",
+                text = "$busyLabel · ${(progress * 100).toInt().coerceIn(0, 100)}%",
                 style = MaterialTheme.typography.bodySmall
             )
         }
 
-        // —— installed ——
-        Text("Installed models", style = MaterialTheme.typography.titleMedium)
+        Text(text = "Installed models", style = MaterialTheme.typography.titleMedium)
+
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = { refreshModels() }) { Text("Refresh") }
             OutlinedButton(
@@ -357,33 +343,78 @@ fun MainScreen(
 
         if (models.isEmpty()) {
             Text(
-                "None yet — grab one from the catalog above.",
+                text = "None yet — grab one from the catalog above.",
                 style = MaterialTheme.typography.bodySmall
             )
         } else {
-            models.forEach { m ->
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable(enabled = !busy) { loadPath(m.path, m.name) }
-                ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Text(m.name, style = MaterialTheme.typography.bodyLarge)
-                        Text(
-                            "${m.sizeMb} MB" + if (selectedPath == m.path) " · selected" else "",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
-                }
+            for (m in models) {
+                InstalledCard(
+                    entry = m,
+                    selected = selectedPath == m.path,
+                    enabled = !busy,
+                    onClick = { loadPath(m.path, m.name) }
+                )
             }
         }
 
         Spacer(modifier = Modifier.height(8.dp))
-        Text(nativeStatus, style = MaterialTheme.typography.bodySmall)
+        Text(text = nativeStatus, style = MaterialTheme.typography.bodySmall)
         Text(
-            "API: POST /v1/chat/completions  (\"stream\": true for SSE)",
+            text = "API: POST /v1/chat/completions  (\"stream\": true for SSE)",
             style = MaterialTheme.typography.bodySmall
         )
+    }
+}
+
+@Composable
+private fun CatalogCard(
+    model: CatalogModel,
+    downloaded: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = enabled, onClick = onClick)
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(text = model.name, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = buildString {
+                    append(model.sizeLabel)
+                    if (model.note.isNotBlank()) append(" · ").append(model.note)
+                    if (downloaded) append(" · downloaded")
+                },
+                style = MaterialTheme.typography.bodySmall
+            )
+            Text(
+                text = if (downloaded) "tap to load" else "tap to download + load",
+                style = MaterialTheme.typography.labelSmall
+            )
+        }
+    }
+}
+
+@Composable
+private fun InstalledCard(
+    entry: ModelEntry,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = enabled, onClick = onClick)
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(text = entry.name, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = "${entry.sizeMb} MB" + if (selected) " · selected" else "",
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
     }
 }
 
