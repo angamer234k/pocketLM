@@ -11,3 +11,5 @@
 *.ap_
 *.aab
 app/build
+keystore/*.p12
+keystore/*.jks
