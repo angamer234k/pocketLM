@@ -28,6 +28,8 @@ class LlmServerService : Service() {
         const val ACTION_LOAD_MODEL = "com.angamer.pocketlm.LOAD_MODEL"
         const val EXTRA_PORT = "port"
         const val EXTRA_MODEL_PATH = "model_path"
+        const val EXTRA_N_CTX = "n_ctx"
+        const val EXTRA_N_THREADS = "n_threads"
         private const val CHANNEL_ID = "pocketlm_server"
         private const val NOTIF_ID = 1
         private const val TAG = "LlmServerService"
@@ -54,19 +56,20 @@ class LlmServerService : Service() {
                 startServer(port)
             }
             ACTION_STOP -> {
-                LlamaBridge.abort()
                 stopServer()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
             ACTION_LOAD_MODEL -> {
                 val path = intent.getStringExtra(EXTRA_MODEL_PATH)
+                val nCtx = intent.getIntExtra(EXTRA_N_CTX, 2048)
+                val nThreads = intent.getIntExtra(EXTRA_N_THREADS, 4)
                 if (!path.isNullOrBlank()) {
                     inferPool.execute {
-                        val ok = LlamaBridge.loadModel(path)
+                        val ok = LlamaBridge.loadModel(path, nCtx, nThreads)
                         val name = path.substringAfterLast('/')
                         if (ok) setLoadedModelName(name) else setLoadedModelName("none")
-                        Log.i(TAG, "loadModel($path) => $ok")
+                        Log.i(TAG, "loadModel($path) ctx=$nCtx threads=$nThreads => $ok")
                     }
                 }
             }
@@ -110,9 +113,7 @@ class LlmServerService : Service() {
     }
 
     override fun onDestroy() {
-        LlamaBridge.abort()
         stopServer()
-        LlamaBridge.unloadModel()
         inferPool.shutdownNow()
         super.onDestroy()
     }
@@ -126,7 +127,6 @@ class LlmServerService : Service() {
             val uri = session.uri.substringBefore('?')
             val method = session.method
 
-            // CORS preflight
             if (method == Method.OPTIONS) {
                 return cors(newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, ""))
             }
@@ -184,15 +184,13 @@ class LlmServerService : Service() {
                 val maxTokens = json.optInt("max_tokens", 256).coerceIn(1, 4096)
                 val temperature = json.optDouble("temperature", 0.7).toFloat().coerceIn(0f, 2f)
                 val stream = json.optBoolean("stream", false)
-
                 val prompt = buildPrompt(messages)
 
                 if (stream) {
                     streamResponse(prompt, maxTokens, temperature)
                 } else {
                     val completion = LlamaBridge.complete(prompt, maxTokens, temperature)
-                    val response = buildCompletionJson(completion)
-                    newFixedLengthResponse(Response.Status.OK, "application/json", response)
+                    newFixedLengthResponse(Response.Status.OK, "application/json", buildCompletionJson(completion))
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "chat error", e)
@@ -211,15 +209,10 @@ class LlmServerService : Service() {
                 val role = m.optString("role", "user")
                 val content = when (val c = m.opt("content")) {
                     is String -> c
-                    is JSONArray -> {
-                        // multimodal parts — take text only for now
-                        buildString {
-                            for (j in 0 until c.length()) {
-                                val part = c.optJSONObject(j) ?: continue
-                                if (part.optString("type") == "text") {
-                                    append(part.optString("text"))
-                                }
-                            }
+                    is JSONArray -> buildString {
+                        for (j in 0 until c.length()) {
+                            val part = c.optJSONObject(j) ?: continue
+                            if (part.optString("type") == "text") append(part.optString("text"))
                         }
                     }
                     else -> ""
@@ -253,7 +246,6 @@ class LlmServerService : Service() {
         private fun streamResponse(prompt: String, maxTokens: Int, temperature: Float): Response {
             val pin = PipedInputStream(64 * 1024)
             val pout = PipedOutputStream(pin)
-            val started = AtomicBoolean(false)
 
             inferPool.execute {
                 try {
@@ -270,8 +262,7 @@ class LlmServerService : Service() {
                                         .put("delta", JSONObject().put("content", token))
                                         .put("finish_reason", JSONObject.NULL)
                                 ))
-                            val line = "data: ${chunk}\n\n"
-                            pout.write(line.toByteArray(Charsets.UTF_8))
+                            pout.write("data: $chunk\n\n".toByteArray(Charsets.UTF_8))
                             pout.flush()
                         }
 
@@ -288,7 +279,7 @@ class LlmServerService : Service() {
                                             .put("delta", JSONObject())
                                             .put("finish_reason", "stop")
                                     ))
-                                pout.write("data: ${done}\n\n".toByteArray(Charsets.UTF_8))
+                                pout.write("data: $done\n\n".toByteArray(Charsets.UTF_8))
                                 pout.write("data: [DONE]\n\n".toByteArray(Charsets.UTF_8))
                                 pout.flush()
                             } finally {
@@ -298,8 +289,7 @@ class LlmServerService : Service() {
 
                         override fun onError(message: String) {
                             try {
-                                val err = JSONObject().put("error", message)
-                                pout.write("data: ${err}\n\n".toByteArray(Charsets.UTF_8))
+                                pout.write("data: ${JSONObject().put("error", message)}\n\n".toByteArray(Charsets.UTF_8))
                                 pout.write("data: [DONE]\n\n".toByteArray(Charsets.UTF_8))
                                 pout.flush()
                             } finally {
@@ -313,11 +303,7 @@ class LlmServerService : Service() {
                 }
             }
 
-            val response = newChunkedResponse(
-                Response.Status.OK,
-                "text/event-stream",
-                pin
-            )
+            val response = newChunkedResponse(Response.Status.OK, "text/event-stream", pin)
             response.addHeader("Cache-Control", "no-cache")
             response.addHeader("Connection", "keep-alive")
             response.addHeader("X-Accel-Buffering", "no")
