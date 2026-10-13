@@ -26,8 +26,9 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -39,10 +40,11 @@ import androidx.compose.ui.unit.dp
 import com.angamer.pocketlm.AppPrefs
 import com.angamer.pocketlm.model.CatalogModel
 import com.angamer.pocketlm.model.ModelCatalog
-import com.angamer.pocketlm.model.ModelDownloader
+import com.angamer.pocketlm.model.ModelDownloads
 import com.angamer.pocketlm.model.formatBytes
 import com.angamer.pocketlm.model.tags
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -60,48 +62,57 @@ fun ModelsScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val modelsDir = remember { File(context.filesDir, "models").apply { mkdirs() } }
+    val jobs by ModelDownloads.jobs.collectAsState()
 
     var installed by remember { mutableStateOf<List<Installed>>(emptyList()) }
-    var busy by remember { mutableStateOf(false) }
-    var busyLabel by remember { mutableStateOf("") }
-    var progress by remember { mutableFloatStateOf(0f) }
     var customUrl by remember { mutableStateOf("") }
     var nCtx by remember { mutableIntStateOf(AppPrefs.nCtx(context)) }
     var threads by remember { mutableIntStateOf(AppPrefs.threads(context)) }
+    var importing by remember { mutableStateOf(false) }
+    var importProgress by remember { mutableStateOf(0f) }
 
     fun refresh() {
-        installed = modelsDir.listFiles()
-            ?.filter { it.isFile && it.name.endsWith(".gguf", true) }
-            ?.map { Installed(it.name, it.absolutePath, it.length()) }
-            ?.sortedBy { it.name }
-            ?: emptyList()
+        installed = ModelDownloads.allGguf(context)
+            .map { Installed(it.name, it.absolutePath, it.length()) }
     }
 
-    androidx.compose.runtime.LaunchedEffect(Unit) { refresh() }
+    LaunchedEffect(Unit) {
+        ModelDownloads.ensureReceiver(context)
+        refresh()
+    }
 
-    fun have(name: String) = File(modelsDir, name).exists()
+    // keep progress alive across tab switches; poll DownloadManager while any job runs
+    LaunchedEffect(jobs.any { it.running }) {
+        while (jobs.any { it.running } || ModelDownloads.anyRunning()) {
+            ModelDownloads.poll(context)
+            delay(500)
+        }
+    }
 
-    fun download(url: String, filename: String, thenLoad: Boolean) {
-        if (busy) return
-        scope.launch {
-            busy = true
-            busyLabel = "Downloading $filename"
-            progress = 0f
-            try {
-                val dest = File(modelsDir, filename)
-                withContext(Dispatchers.IO) {
-                    ModelDownloader.download(url, dest) { p -> if (p >= 0f) progress = p }
-                }
+    // when a download finishes, refresh list and optionally load
+    LaunchedEffect(jobs) {
+        for (job in jobs) {
+            if (!job.running && job.finishedPath != null && job.error == null) {
                 refresh()
-                Toast.makeText(context, "Saved $filename", Toast.LENGTH_SHORT).show()
-                if (thenLoad) onLoad(dest.absolutePath)
-            } catch (e: Exception) {
-                Toast.makeText(context, "Download failed: ${e.message}", Toast.LENGTH_LONG).show()
-            } finally {
-                busy = false
+                Toast.makeText(context, "Saved ${job.filename}", Toast.LENGTH_SHORT).show()
+                if (job.thenLoad) onLoad(job.finishedPath)
+                ModelDownloads.clearFinished(job.id)
+            } else if (!job.running && job.error != null) {
+                Toast.makeText(context, job.error, Toast.LENGTH_LONG).show()
+                ModelDownloads.clearFinished(job.id)
             }
         }
+    }
+
+    fun have(name: String) = ModelDownloads.allGguf(context).any { it.name == name }
+
+    fun download(url: String, filename: String, thenLoad: Boolean) {
+        if (ModelDownloads.isActive(filename)) {
+            Toast.makeText(context, "Already downloading $filename", Toast.LENGTH_SHORT).show()
+            return
+        }
+        ModelDownloads.enqueue(context, url, filename, thenLoad)
+        Toast.makeText(context, "Downloading $filename…", Toast.LENGTH_SHORT).show()
     }
 
     fun useCatalog(model: CatalogModel) {
@@ -109,20 +120,20 @@ fun ModelsScreen(
             Toast.makeText(context, model.note, Toast.LENGTH_LONG).show()
             return
         }
-        val file = File(modelsDir, model.filename)
-        if (file.exists()) onLoad(file.absolutePath) else download(model.url, model.filename, true)
+        val existing = ModelDownloads.allGguf(context).firstOrNull { it.name == model.filename }
+        if (existing != null) onLoad(existing.absolutePath)
+        else download(model.url, model.filename, true)
     }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
         scope.launch {
-            busy = true
-            busyLabel = "Importing"
-            progress = 0f
+            importing = true
+            importProgress = 0f
             try {
                 val name = queryName(context, uri) ?: "model.gguf"
                 val safe = if (name.endsWith(".gguf", true)) name else "$name.gguf"
-                val dest = File(modelsDir, safe)
+                val dest = File(ModelDownloads.modelsDir(context), safe)
                 withContext(Dispatchers.IO) {
                     context.contentResolver.openInputStream(uri)?.use { input ->
                         val total = context.contentResolver.openFileDescriptor(uri, "r")?.statSize ?: -1L
@@ -133,7 +144,7 @@ fun ModelsScreen(
                             while (input.read(buf).also { n = it } >= 0) {
                                 out.write(buf, 0, n)
                                 copied += n
-                                if (total > 0) progress = copied.toFloat() / total
+                                if (total > 0) importProgress = copied.toFloat() / total
                             }
                         }
                     } ?: error("cannot open file")
@@ -143,10 +154,12 @@ fun ModelsScreen(
             } catch (e: Exception) {
                 Toast.makeText(context, e.message ?: "import failed", Toast.LENGTH_LONG).show()
             } finally {
-                busy = false
+                importing = false
             }
         }
     }
+
+    val activeJobs = jobs.filter { it.running }
 
     Column(
         modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
@@ -179,18 +192,41 @@ fun ModelsScreen(
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { picker.launch(arrayOf("*/*")) }, enabled = !busy) { Text("Import") }
+            OutlinedButton(onClick = { picker.launch(arrayOf("*/*")) }, enabled = !importing) { Text("Import") }
             OutlinedButton(onClick = onUnload) { Text("Unload") }
         }
 
-        if (busy) {
-            LinearProgressIndicator(progress = { progress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
-            Text(text = "$busyLabel · ${(progress * 100).toInt().coerceIn(0, 100)}%", style = MaterialTheme.typography.bodySmall)
+        if (importing) {
+            LinearProgressIndicator(
+                progress = { importProgress.coerceIn(0f, 1f) },
+                modifier = Modifier.fillMaxWidth()
+            )
+            Text(text = "Importing…", style = MaterialTheme.typography.bodySmall)
+        }
+
+        for (job in activeJobs) {
+            LinearProgressIndicator(
+                progress = { job.progress.coerceIn(0f, 1f) },
+                modifier = Modifier.fillMaxWidth()
+            )
+            Text(
+                text = "Downloading ${job.filename} · ${(job.progress * 100).toInt().coerceIn(0, 100)}%",
+                style = MaterialTheme.typography.bodySmall
+            )
         }
 
         Text(text = "Download", style = MaterialTheme.typography.titleMedium)
+        Text(
+            text = "Uses system Download Manager — keeps going if you leave this tab.",
+            style = MaterialTheme.typography.bodySmall
+        )
         for (model in ModelCatalog.models) {
-            Card(modifier = Modifier.fillMaxWidth().clickable(enabled = !busy) { useCatalog(model) }) {
+            val downloading = ModelDownloads.isActive(model.filename)
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(enabled = !downloading) { useCatalog(model) }
+            ) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(text = model.name, style = MaterialTheme.typography.titleMedium)
                     if (model.note.isNotBlank()) {
@@ -202,7 +238,10 @@ fun ModelsScreen(
                                 text = tag,
                                 modifier = Modifier
                                     .padding(bottom = 4.dp)
-                                    .background(MaterialTheme.colorScheme.secondaryContainer, RoundedCornerShape(8.dp))
+                                    .background(
+                                        MaterialTheme.colorScheme.secondaryContainer,
+                                        RoundedCornerShape(8.dp)
+                                    )
                                     .padding(horizontal = 8.dp, vertical = 4.dp),
                                 style = MaterialTheme.typography.labelMedium
                             )
@@ -211,6 +250,7 @@ fun ModelsScreen(
                     Text(
                         text = when {
                             !model.downloadable -> "LiteRT — not runnable yet"
+                            downloading -> "Downloading…"
                             have(model.filename) -> "Downloaded · tap to load"
                             else -> "Tap to download"
                         },
@@ -225,8 +265,7 @@ fun ModelsScreen(
             onValueChange = { customUrl = it },
             modifier = Modifier.fillMaxWidth(),
             label = { Text("Custom GGUF URL") },
-            singleLine = true,
-            enabled = !busy
+            singleLine = true
         )
         Button(
             onClick = {
@@ -237,7 +276,7 @@ fun ModelsScreen(
                     .let { if (it.endsWith(".gguf", true)) it else "$it.gguf" }
                 download(url, filename, true)
             },
-            enabled = !busy && customUrl.isNotBlank(),
+            enabled = customUrl.isNotBlank(),
             modifier = Modifier.fillMaxWidth()
         ) { Text("Download URL") }
 
@@ -246,7 +285,11 @@ fun ModelsScreen(
             Text(text = "No GGUF files yet.", style = MaterialTheme.typography.bodyMedium)
         }
         for (file in installed) {
-            Card(modifier = Modifier.fillMaxWidth().clickable(enabled = !busy) { onLoad(file.path) }) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onLoad(file.path) }
+            ) {
                 Column(Modifier.padding(12.dp)) {
                     Text(text = file.name, style = MaterialTheme.typography.bodyLarge)
                     Text(
