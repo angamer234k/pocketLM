@@ -26,12 +26,47 @@ object UpdateChecker {
     var last: UpdateInfo? = null
 
     fun check(): UpdateInfo {
-        val version = get(VERSION_URL)
-        val json = JSONObject(version)
-        val code = json.optInt("versionCode", 0)
-        val name = json.optString("versionName", "")
-        val notes = json.optString("notes", "")
-        val apk = findApk()
+        // Prefer version.json on the GitHub release (written by CI each build),
+        // fall back to latest.json on main. Cache-bust raw CDN.
+        var code = 0
+        var name = ""
+        var notes = ""
+        var apk: String? = null
+
+        try {
+            val releaseBody = get(RELEASE_URL)
+            val release = JSONObject(releaseBody)
+            val assets = release.optJSONArray("assets")
+            if (assets != null) {
+                for (i in 0 until assets.length()) {
+                    val asset = assets.getJSONObject(i)
+                    val assetName = asset.optString("name")
+                    val url = asset.optString("browser_download_url").ifBlank { null }
+                    when {
+                        assetName == "version.json" && url != null -> {
+                            val v = JSONObject(get(url))
+                            code = v.optInt("versionCode", code)
+                            name = v.optString("versionName", name)
+                            notes = v.optString("notes", notes)
+                        }
+                        assetName.endsWith(".apk") && apk == null -> apk = url
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            // release missing or unreachable
+        }
+
+        if (code <= 0) {
+            val version = get("$VERSION_URL?t=${System.currentTimeMillis()}")
+            val json = JSONObject(version)
+            code = json.optInt("versionCode", 0)
+            name = json.optString("versionName", name)
+            notes = json.optString("notes", notes)
+        }
+
+        if (apk == null) apk = findApk()
+
         val info = UpdateInfo(code, name, apk, notes)
         last = info
         return info
@@ -112,6 +147,7 @@ object UpdateChecker {
                 readTimeout = 60_000
                 setRequestProperty("User-Agent", "pocketLM")
                 setRequestProperty("Accept", "application/vnd.github+json, application/octet-stream, */*")
+                setRequestProperty("Cache-Control", "no-cache")
             }
             val code = conn.responseCode
             if (code in 300..399) {

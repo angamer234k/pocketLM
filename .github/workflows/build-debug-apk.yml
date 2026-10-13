@@ -50,6 +50,16 @@ jobs:
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
 
+      - name: Prepare release assets
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          CODE=$(grep -oP 'versionCode\s*=\s*\K[0-9]+' app/build.gradle.kts | head -1)
+          NAME=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts | head -1)
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/*.apk "dist/pocketlm-${CODE}.apk"
+          printf '%s\n' "{\"versionCode\":${CODE},\"versionName\":\"${NAME}\",\"notes\":\"CI build ${{ github.run_number }}\"}" > dist/version.json
+          cat dist/version.json
+
       - name: Publish latest release APK
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
@@ -59,8 +69,10 @@ jobs:
           prerelease: true
           make_latest: true
           body: |
-            Sideload build. versionCode lives in latest.json.
-          files: app/build/outputs/apk/debug/*.apk
+            Sideload build. versionCode also in version.json asset + latest.json on main.
+          files: |
+            dist/*.apk
+            dist/version.json
 
       - name: Summarize
         if: always()
