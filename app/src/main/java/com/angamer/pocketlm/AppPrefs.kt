@@ -1,6 +1,7 @@
 package com.angamer.pocketlm
 
 import android.content.Context
+import com.angamer.pocketlm.update.UpdateMode
 
 object AppPrefs {
     private const val NAME = "pocketlm_prefs"
@@ -24,4 +25,10 @@ object AppPrefs {
     fun maxTokens(context: Context) = sp(context).getInt("max_tokens", 256)
     fun setMaxTokens(context: Context, value: Int) =
         sp(context).edit().putInt("max_tokens", value).apply()
+
+    fun updateMode(context: Context): UpdateMode =
+        UpdateMode.from(sp(context).getString("update_mode", UpdateMode.OFF.name))
+
+    fun setUpdateMode(context: Context, mode: UpdateMode) =
+        sp(context).edit().putString("update_mode", mode.name).apply()
 }

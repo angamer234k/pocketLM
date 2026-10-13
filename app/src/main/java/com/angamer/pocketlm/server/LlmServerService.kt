@@ -4,6 +4,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
@@ -18,7 +19,6 @@ import java.io.IOException
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicBoolean
 
 class LlmServerService : Service() {
 
@@ -80,7 +80,7 @@ class LlmServerService : Service() {
     private fun startServer(port: Int) {
         stopServer()
         try {
-            server = PocketHttpServer(port, inferPool).also { it.start() }
+            server = PocketHttpServer(port, inferPool, applicationContext).also { it.start() }
             Log.i(TAG, "Server started on port $port")
         } catch (e: IOException) {
             Log.e(TAG, "Failed to start server", e)
@@ -120,7 +120,8 @@ class LlmServerService : Service() {
 
     private class PocketHttpServer(
         port: Int,
-        private val inferPool: java.util.concurrent.ExecutorService
+        private val inferPool: java.util.concurrent.ExecutorService,
+        private val appContext: Context
     ) : NanoHTTPD(port) {
 
         override fun serve(session: IHTTPSession): Response {
@@ -129,6 +130,26 @@ class LlmServerService : Service() {
 
             if (method == Method.OPTIONS) {
                 return cors(newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, ""))
+            }
+
+            if (uri.startsWith("/v1/")) {
+                val authHeader = session.headers["authorization"]
+                when (val reason = ApiKeys.check(appContext, authHeader)) {
+                    null -> {}
+                    else -> {
+                        val status = when {
+                            reason.startsWith("rate") -> Response.Status.TOO_MANY_REQUESTS
+                            reason.startsWith("disabled") -> Response.Status.FORBIDDEN
+                            else -> Response.Status.UNAUTHORIZED
+                        }
+                        val body = JSONObject()
+                            .put("error", JSONObject()
+                                .put("message", reason)
+                                .put("type", "auth_error"))
+                            .toString()
+                        return cors(newFixedLengthResponse(status, "application/json", body))
+                    }
+                }
             }
 
             return when {

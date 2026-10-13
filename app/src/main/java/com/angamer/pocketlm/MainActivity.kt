@@ -2,6 +2,7 @@ package com.angamer.pocketlm
 
 import android.content.Intent
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -23,6 +24,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import com.angamer.pocketlm.native.LlamaBridge
 import com.angamer.pocketlm.server.LlmServerService
@@ -30,7 +32,11 @@ import com.angamer.pocketlm.ui.ChatScreen
 import com.angamer.pocketlm.ui.ModelsScreen
 import com.angamer.pocketlm.ui.SettingsScreen
 import com.angamer.pocketlm.ui.theme.PocketLMTheme
+import com.angamer.pocketlm.update.UpdateChecker
+import com.angamer.pocketlm.update.UpdateMode
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import java.io.File
 
 private enum class Tab(val label: String) { Chat("Chat"), Models("Models"), Settings("Settings") }
@@ -85,6 +91,7 @@ private fun PocketApp(
     onLoadModel: (String) -> Unit,
     onUnloadModel: () -> Unit
 ) {
+    val context = LocalContext.current
     var tab by remember { mutableStateOf(Tab.Chat) }
     var loaded by remember { mutableStateOf(false) }
     var modelName by remember { mutableStateOf("none") }
@@ -95,6 +102,43 @@ private fun PocketApp(
             loaded = LlamaBridge.isLoaded()
             modelName = if (loaded) LlmServerService.loadedModelName else "none"
             delay(800)
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        val mode = AppPrefs.updateMode(context)
+        if (mode == UpdateMode.OFF) return@LaunchedEffect
+        try {
+            val info = withContext(Dispatchers.IO) { UpdateChecker.check() }
+            if (info.remoteCode <= BuildConfig.VERSION_CODE) return@LaunchedEffect
+            when (mode) {
+                UpdateMode.CHECK_ON_START -> {
+                    Toast.makeText(
+                        context,
+                        "Update ${info.remoteName} available. Open Settings.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+                UpdateMode.AUTO -> {
+                    val url = info.apkUrl
+                    if (url.isNullOrBlank()) {
+                        Toast.makeText(
+                            context,
+                            "Update listed but no APK release yet",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    } else {
+                        Toast.makeText(context, "Downloading update…", Toast.LENGTH_SHORT).show()
+                        val file = withContext(Dispatchers.IO) {
+                            UpdateChecker.download(context, url) {}
+                        }
+                        UpdateChecker.install(context, file)
+                    }
+                }
+                UpdateMode.OFF -> {}
+            }
+        } catch (_: Exception) {
+            // silent on start
         }
     }
 
