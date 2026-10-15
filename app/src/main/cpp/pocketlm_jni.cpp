@@ -67,8 +67,6 @@ Java_com_angamer_pocketlm_native_LlamaBridge_nativeLoadModel(
 
     llama_model_params mparams = llama_model_default_params();
     mparams.n_gpu_layers = g_n_gpu_layers;
-    mparams.use_mmap = true;
-    mparams.use_mlock = false;
 
     g_model = llama_model_load_from_file(path, mparams);
     env->ReleaseStringUTFChars(path_, path);
@@ -120,7 +118,7 @@ Java_com_angamer_pocketlm_native_LlamaBridge_nativeAbort(JNIEnv *, jobject) {
 JNIEXPORT jstring JNICALL
 Java_com_angamer_pocketlm_native_LlamaBridge_nativeBackendInfo(JNIEnv *env, jobject) {
     char buf[192];
-    snprintf(buf, sizeof(buf), "llama.cpp cpu · threads=%d · gpu_layers=%d · mmap=on",
+    snprintf(buf, sizeof(buf), "llama.cpp cpu · threads=%d · gpu_layers=%d",
              g_n_threads, g_n_gpu_layers);
     return env->NewStringUTF(buf);
 }
