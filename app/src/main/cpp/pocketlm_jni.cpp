@@ -1,5 +1,4 @@
 #include <jni.h>
-#include <algorithm>
 #include <string>
 #include <vector>
 #include <mutex>
@@ -19,6 +18,8 @@ static int g_n_threads = 4;
 static int g_n_gpu_layers = 0;
 static std::atomic<bool> g_abort{false};
 
+static int imin(int a, int b) { return a < b ? a : b; }
+
 static void free_model_locked() {
     if (g_ctx) {
         llama_free(g_ctx);
@@ -36,7 +37,7 @@ static bool decode_prompt(const std::vector<llama_token> & tokens) {
     const int n_batch = llama_n_batch(g_ctx);
     int i = 0;
     while (i < n) {
-        const int take = std::min(n_batch, n - i);
+        const int take = imin(n_batch, n - i);
         llama_batch batch = llama_batch_get_one(const_cast<llama_token*>(tokens.data() + i), take);
         if (llama_decode(g_ctx, batch) != 0) {
             return false;
@@ -79,7 +80,7 @@ Java_com_angamer_pocketlm_native_LlamaBridge_nativeLoadModel(
 
     llama_context_params cparams = llama_context_default_params();
     cparams.n_ctx = n_ctx > 0 ? n_ctx : 2048;
-    cparams.n_batch = std::min(512, cparams.n_ctx);
+    cparams.n_batch = imin(512, (int) cparams.n_ctx);
     cparams.n_ubatch = cparams.n_batch;
     cparams.n_threads = g_n_threads;
     cparams.n_threads_batch = g_n_threads;
