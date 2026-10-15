@@ -58,6 +58,7 @@ private data class Installed(val name: String, val path: String, val bytes: Long
 fun ModelsScreen(
     modifier: Modifier = Modifier,
     loadedName: String,
+    loading: Boolean = false,
     onLoad: (String) -> Unit,
     onUnload: () -> Unit
 ) {
@@ -122,6 +123,10 @@ fun ModelsScreen(
             Toast.makeText(context, model.note, Toast.LENGTH_LONG).show()
             return
         }
+        if (loading) {
+            Toast.makeText(context, "Still loading…", Toast.LENGTH_SHORT).show()
+            return
+        }
         val existing = ModelDownloads.allModels(context).firstOrNull { it.name == model.filename }
         if (existing != null) onLoad(existing.absolutePath)
         else download(model.url, model.filename, true)
@@ -161,6 +166,7 @@ fun ModelsScreen(
     }
 
     val activeJobs = jobs.filter { it.running }
+    val busy = loading || importing
 
     Column(
         modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
@@ -168,9 +174,16 @@ fun ModelsScreen(
     ) {
         Text(text = "Models", style = MaterialTheme.typography.headlineSmall)
         Text(
-            text = if (loadedName.isNotBlank() && loadedName != "none") "Loaded: $loadedName" else "Nothing loaded",
+            text = when {
+                loading -> "Loading model…"
+                loadedName.isNotBlank() && loadedName != "none" -> "Loaded: $loadedName"
+                else -> "Nothing loaded"
+            },
             style = MaterialTheme.typography.bodyMedium
         )
+        if (loading) {
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+        }
 
         Text(text = "Load settings", style = MaterialTheme.typography.titleMedium)
         Text(text = "Context $nCtx · next load", style = MaterialTheme.typography.bodySmall)
@@ -192,7 +205,7 @@ fun ModelsScreen(
             }
         }
         Text(
-            text = "GPU layers $gpuLayers (0 = CPU only; needs GPU backend later for real offload)",
+            text = "GPU layers $gpuLayers (0 = CPU only)",
             style = MaterialTheme.typography.bodySmall
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -205,10 +218,10 @@ fun ModelsScreen(
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { picker.launch(arrayOf("*/*")) }, enabled = !importing) {
+            OutlinedButton(onClick = { picker.launch(arrayOf("*/*")) }, enabled = !busy) {
                 Text("Import")
             }
-            OutlinedButton(onClick = onUnload) { Text("Unload") }
+            OutlinedButton(onClick = onUnload, enabled = !loading) { Text("Unload") }
         }
 
         if (importing) {
@@ -257,7 +270,7 @@ fun ModelsScreen(
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable(enabled = !downloading) { useCatalog(model) }
+                    .clickable(enabled = !downloading && !loading) { useCatalog(model) }
             ) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(text = model.name, style = MaterialTheme.typography.titleMedium)
@@ -283,6 +296,7 @@ fun ModelsScreen(
                         text = when {
                             !model.downloadable -> "Import a MediaPipe/LiteRT file"
                             downloading -> "Downloading…"
+                            have(model.filename) && model.filename == loadedName -> "Loaded · tap to reload"
                             have(model.filename) -> "Downloaded · tap to load"
                             else -> "Tap to download"
                         },
@@ -319,7 +333,7 @@ fun ModelsScreen(
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { onLoad(file.path) }
+                    .clickable(enabled = !loading) { onLoad(file.path) }
             ) {
                 Column(Modifier.padding(12.dp)) {
                     Text(text = file.name, style = MaterialTheme.typography.bodyLarge)

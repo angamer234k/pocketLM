@@ -2,6 +2,7 @@ package com.angamer.pocketlm
 
 import android.content.Intent
 import android.os.Bundle
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -22,6 +23,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -36,6 +38,7 @@ import com.angamer.pocketlm.update.UpdateChecker
 import com.angamer.pocketlm.update.UpdateMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -49,7 +52,11 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             PocketLMTheme {
+                val scope = rememberCoroutineScope()
+                var loadingPath by remember { mutableStateOf<String?>(null) }
+
                 PocketApp(
+                    loadingPath = loadingPath,
                     onStartServer = { port ->
                         val intent = Intent(this, LlmServerService::class.java).apply {
                             action = LlmServerService.ACTION_START
@@ -65,19 +72,56 @@ class MainActivity : ComponentActivity() {
                         )
                     },
                     onLoadModel = { path ->
-                        startService(
-                            Intent(this, LlmServerService::class.java).apply {
-                                action = LlmServerService.ACTION_LOAD_MODEL
-                                putExtra(LlmServerService.EXTRA_MODEL_PATH, path)
-                                putExtra(LlmServerService.EXTRA_N_CTX, AppPrefs.nCtx(this@MainActivity))
-                                putExtra(LlmServerService.EXTRA_N_THREADS, AppPrefs.threads(this@MainActivity))
-                                putExtra(LlmServerService.EXTRA_N_GPU_LAYERS, AppPrefs.gpuLayers(this@MainActivity))
+                        if (loadingPath != null) {
+                            Toast.makeText(this, "Already loading a model…", Toast.LENGTH_SHORT).show()
+                            return@PocketApp
+                        }
+                        val name = path.substringAfterLast('/')
+                        loadingPath = path
+                        Toast.makeText(this, "Loading $name…", Toast.LENGTH_SHORT).show()
+                        scope.launch {
+                            val ok = withContext(Dispatchers.IO) {
+                                try {
+                                    EngineRouter.load(
+                                        applicationContext,
+                                        path,
+                                        AppPrefs.nCtx(this@MainActivity),
+                                        AppPrefs.threads(this@MainActivity),
+                                        AppPrefs.gpuLayers(this@MainActivity)
+                                    )
+                                } catch (e: Exception) {
+                                    Log.e("pocketLM", "load failed", e)
+                                    false
+                                }
                             }
-                        )
+                            loadingPath = null
+                            if (ok) {
+                                LlmServerService.setLoadedModelName(name)
+                                Toast.makeText(
+                                    this@MainActivity,
+                                    "Loaded $name",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            } else {
+                                LlmServerService.setLoadedModelName("none")
+                                val exists = File(path).exists()
+                                val size = if (exists) File(path).length() else -1L
+                                Toast.makeText(
+                                    this@MainActivity,
+                                    if (!exists) {
+                                        "File missing: $name"
+                                    } else {
+                                        "Failed to load $name (${size / (1024 * 1024)}MB). Check logcat."
+                                    },
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        }
                     },
                     onUnloadModel = {
                         EngineRouter.unload()
                         LlmServerService.setLoadedModelName("none")
+                        Toast.makeText(this, "Model unloaded", Toast.LENGTH_SHORT).show()
                     }
                 )
             }
@@ -87,6 +131,7 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun PocketApp(
+    loadingPath: String?,
     onStartServer: (Int) -> Unit,
     onStopServer: () -> Unit,
     onLoadModel: (String) -> Unit,
@@ -98,11 +143,11 @@ private fun PocketApp(
     var modelName by remember { mutableStateOf("none") }
     var tick by remember { mutableIntStateOf(0) }
 
-    LaunchedEffect(tick) {
+    LaunchedEffect(tick, loadingPath) {
         while (true) {
             loaded = EngineRouter.isLoaded()
             modelName = if (loaded) LlmServerService.loadedModelName else "none"
-            delay(800)
+            delay(500)
         }
     }
 
@@ -176,6 +221,7 @@ private fun PocketApp(
             Tab.Models -> ModelsScreen(
                 modifier = Modifier.padding(padding),
                 loadedName = if (loaded) modelName else "",
+                loading = loadingPath != null,
                 onLoad = onLoadModel,
                 onUnload = {
                     onUnloadModel()

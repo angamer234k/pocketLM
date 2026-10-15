@@ -1,5 +1,5 @@
 {
-  "versionCode": 7,
-  "versionName": "0.7.0",
-  "notes": "Faster llama decode, GPU layer setting, LiteRT/MediaPipe path, cancel downloads, persistent chat"
+  "versionCode": 8,
+  "versionName": "0.7.1",
+  "notes": "Fix model load: in-app load with progress toast, not silent service"
 }
