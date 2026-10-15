@@ -48,9 +48,12 @@ object LiteRtBridge {
             return false
         }
         return try {
-            val optionsClass = Class.forName(
-                "com.google.mediapipe.tasks.genai.llminference.LlmInference\$LlmInferenceOptions"
-            )
+            // Nested Java class name: Outer$Inner
+            val optionsClassName =
+                "com.google.mediapipe.tasks.genai.llminference.LlmInference" +
+                    "$" +
+                    "LlmInferenceOptions"
+            val optionsClass = Class.forName(optionsClassName)
             val builderMethod = optionsClass.getMethod("builder")
             val builder = builderMethod.invoke(null)
             builder.javaClass.getMethod("setModelPath", String::class.java).invoke(builder, path)
@@ -84,7 +87,6 @@ object LiteRtBridge {
         val eng = engine ?: return "[error] no LiteRT model loaded"
         return try {
             abort.set(false)
-            // Prefer generateResponseAsync-style if present; else generateResponse.
             val methods = eng.javaClass.methods
             val gen = methods.firstOrNull { it.name == "generateResponse" && it.parameterTypes.size == 1 }
                 ?: return "[error] generateResponse missing"
@@ -102,7 +104,6 @@ object LiteRtBridge {
             if (text.startsWith("[error]")) {
                 callback.onError(text.removePrefix("[error] "))
             } else {
-                // MediaPipe path may not stream; emit in chunks so UI still updates.
                 val step = 24
                 var i = 0
                 while (i < text.length && !abort.get()) {
