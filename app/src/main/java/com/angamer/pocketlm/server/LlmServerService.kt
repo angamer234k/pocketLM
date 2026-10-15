@@ -10,7 +10,7 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import com.angamer.pocketlm.native.LlamaBridge
+import com.angamer.pocketlm.native.EngineRouter
 import com.angamer.pocketlm.native.TokenCallback
 import fi.iki.elonen.NanoHTTPD
 import org.json.JSONArray
@@ -30,6 +30,7 @@ class LlmServerService : Service() {
         const val EXTRA_MODEL_PATH = "model_path"
         const val EXTRA_N_CTX = "n_ctx"
         const val EXTRA_N_THREADS = "n_threads"
+        const val EXTRA_N_GPU_LAYERS = "n_gpu_layers"
         private const val CHANNEL_ID = "pocketlm_server"
         private const val NOTIF_ID = 1
         private const val TAG = "LlmServerService"
@@ -64,12 +65,16 @@ class LlmServerService : Service() {
                 val path = intent.getStringExtra(EXTRA_MODEL_PATH)
                 val nCtx = intent.getIntExtra(EXTRA_N_CTX, 2048)
                 val nThreads = intent.getIntExtra(EXTRA_N_THREADS, 4)
+                val nGpu = intent.getIntExtra(EXTRA_N_GPU_LAYERS, 0)
                 if (!path.isNullOrBlank()) {
                     inferPool.execute {
-                        val ok = LlamaBridge.loadModel(path, nCtx, nThreads)
+                        val ok = EngineRouter.load(applicationContext, path, nCtx, nThreads, nGpu)
                         val name = path.substringAfterLast('/')
                         if (ok) setLoadedModelName(name) else setLoadedModelName("none")
-                        Log.i(TAG, "loadModel($path) ctx=$nCtx threads=$nThreads => $ok")
+                        Log.i(
+                            TAG,
+                            "loadModel($path) ctx=$nCtx threads=$nThreads gpu=$nGpu => $ok (${EngineRouter.backendInfo()})"
+                        )
                     }
                 }
             }
@@ -103,7 +108,7 @@ class LlmServerService : Service() {
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
 
-        val modelStatus = if (LlamaBridge.isLoaded()) loadedModelName else "no model"
+        val modelStatus = if (EngineRouter.isLoaded()) loadedModelName else "no model"
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("pocketLM")
             .setContentText(":$port · $modelStatus")
@@ -156,7 +161,11 @@ class LlmServerService : Service() {
                 uri == "/v1/models" && method == Method.GET -> cors(handleModels())
                 uri == "/v1/chat/completions" && method == Method.POST -> cors(handleChat(session))
                 uri == "/health" || uri == "/" -> {
-                    val status = if (LlamaBridge.isLoaded()) "ok model=$loadedModelName" else "ok model=none"
+                    val status = if (EngineRouter.isLoaded()) {
+                        "ok model=$loadedModelName backend=${EngineRouter.backendInfo()}"
+                    } else {
+                        "ok model=none"
+                    }
                     cors(newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, "pocketLM $status"))
                 }
                 else -> cors(newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "not found"))
@@ -171,7 +180,7 @@ class LlmServerService : Service() {
         }
 
         private fun handleModels(): Response {
-            val id = if (LlamaBridge.isLoaded()) loadedModelName else "none"
+            val id = if (EngineRouter.isLoaded()) loadedModelName else "none"
             val body = JSONObject()
                 .put("object", "list")
                 .put("data", JSONArray().put(
@@ -186,7 +195,7 @@ class LlmServerService : Service() {
         }
 
         private fun handleChat(session: IHTTPSession): Response {
-            if (!LlamaBridge.isLoaded()) {
+            if (!EngineRouter.isLoaded()) {
                 val err = JSONObject()
                     .put("error", JSONObject()
                         .put("message", "No model loaded")
@@ -210,7 +219,7 @@ class LlmServerService : Service() {
                 if (stream) {
                     streamResponse(prompt, maxTokens, temperature)
                 } else {
-                    val completion = LlamaBridge.complete(prompt, maxTokens, temperature)
+                    val completion = EngineRouter.complete(prompt, maxTokens, temperature)
                     newFixedLengthResponse(Response.Status.OK, "application/json", buildCompletionJson(completion))
                 }
             } catch (e: Exception) {
@@ -270,7 +279,7 @@ class LlmServerService : Service() {
 
             inferPool.execute {
                 try {
-                    LlamaBridge.completeStream(prompt, maxTokens, temperature, object : TokenCallback {
+                    EngineRouter.completeStream(prompt, maxTokens, temperature, object : TokenCallback {
                         override fun onToken(token: String) {
                             val chunk = JSONObject()
                                 .put("id", "chatcmpl-pocketlm")
