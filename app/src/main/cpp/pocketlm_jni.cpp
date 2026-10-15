@@ -15,6 +15,7 @@ static std::mutex g_mutex;
 static llama_model * g_model = nullptr;
 static llama_context * g_ctx = nullptr;
 static int g_n_threads = 4;
+static int g_n_gpu_layers = 0;
 static std::atomic<bool> g_abort{false};
 
 static void free_model_locked() {
@@ -28,11 +29,28 @@ static void free_model_locked() {
     }
 }
 
+static bool decode_prompt(const std::vector<llama_token> & tokens) {
+    if (tokens.empty()) return true;
+    // Batch the full prompt in one decode when possible — much faster than 1-token loops.
+    const int n = (int) tokens.size();
+    const int n_batch = llama_n_batch(g_ctx);
+    int i = 0;
+    while (i < n) {
+        const int take = std::min(n_batch, n - i);
+        llama_batch batch = llama_batch_get_one(const_cast<llama_token*>(tokens.data() + i), take);
+        if (llama_decode(g_ctx, batch) != 0) {
+            return false;
+        }
+        i += take;
+    }
+    return true;
+}
+
 extern "C" {
 
 JNIEXPORT jboolean JNICALL
 Java_com_angamer_pocketlm_native_LlamaBridge_nativeLoadModel(
-        JNIEnv *env, jobject /*thiz*/, jstring path_, jint n_ctx, jint n_threads) {
+        JNIEnv *env, jobject /*thiz*/, jstring path_, jint n_ctx, jint n_threads, jint n_gpu_layers) {
 
     const char * path = env->GetStringUTFChars(path_, nullptr);
     if (!path) return JNI_FALSE;
@@ -42,11 +60,15 @@ Java_com_angamer_pocketlm_native_LlamaBridge_nativeLoadModel(
     g_abort = false;
 
     g_n_threads = n_threads > 0 ? n_threads : 4;
+    g_n_gpu_layers = n_gpu_layers > 0 ? n_gpu_layers : 0;
 
     llama_backend_init();
 
     llama_model_params mparams = llama_model_default_params();
-    mparams.n_gpu_layers = 0;
+    mparams.n_gpu_layers = g_n_gpu_layers;
+    // Prefer mmap for lower RAM pressure on phones.
+    mparams.use_mmap = true;
+    mparams.use_mlock = false;
 
     g_model = llama_model_load_from_file(path, mparams);
     env->ReleaseStringUTFChars(path_, path);
@@ -58,8 +80,13 @@ Java_com_angamer_pocketlm_native_LlamaBridge_nativeLoadModel(
 
     llama_context_params cparams = llama_context_default_params();
     cparams.n_ctx = n_ctx > 0 ? n_ctx : 2048;
+    cparams.n_batch = std::min(512, cparams.n_ctx);
+    cparams.n_ubatch = cparams.n_batch;
     cparams.n_threads = g_n_threads;
     cparams.n_threads_batch = g_n_threads;
+#ifdef LLAMA_FLASH_ATTN_TYPE_AUTO
+    cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
+#endif
 
     g_ctx = llama_init_from_model(g_model, cparams);
     if (!g_ctx) {
@@ -69,7 +96,7 @@ Java_com_angamer_pocketlm_native_LlamaBridge_nativeLoadModel(
         return JNI_FALSE;
     }
 
-    LOGI("model loaded ok, n_ctx=%d threads=%d", cparams.n_ctx, g_n_threads);
+    LOGI("model loaded ok, n_ctx=%d threads=%d gpu_layers=%d", cparams.n_ctx, g_n_threads, g_n_gpu_layers);
     return JNI_TRUE;
 }
 
@@ -94,6 +121,15 @@ Java_com_angamer_pocketlm_native_LlamaBridge_nativeAbort(JNIEnv *, jobject) {
 }
 
 JNIEXPORT jstring JNICALL
+Java_com_angamer_pocketlm_native_LlamaBridge_nativeBackendInfo(JNIEnv *env, jobject) {
+    // Vulkan is not linked in this build yet; CPU + optional gpu_layers when a GPU backend exists.
+    char buf[192];
+    snprintf(buf, sizeof(buf), "llama.cpp cpu · threads=%d · gpu_layers=%d · mmap=on",
+             g_n_threads, g_n_gpu_layers);
+    return env->NewStringUTF(buf);
+}
+
+JNIEXPORT jstring JNICALL
 Java_com_angamer_pocketlm_native_LlamaBridge_nativeComplete(
         JNIEnv *env, jobject /*thiz*/,
         jstring prompt_, jint max_tokens, jfloat temperature) {
@@ -105,7 +141,7 @@ Java_com_angamer_pocketlm_native_LlamaBridge_nativeComplete(
     g_abort = false;
 
     if (!g_model || !g_ctx) {
-        env->ReleaseStringUTFChars(prompt_, prompt);
+        env->ReleaseStringUTFChars(path_, prompt);
         return env->NewStringUTF("[error] no model loaded");
     }
 
@@ -125,11 +161,8 @@ Java_com_angamer_pocketlm_native_LlamaBridge_nativeComplete(
 
     llama_memory_clear(llama_get_memory(g_ctx), true);
 
-    for (int i = 0; i < n; i++) {
-        llama_batch batch = llama_batch_get_one(&tokens[i], 1);
-        if (llama_decode(g_ctx, batch) != 0) {
-            return env->NewStringUTF("[error] decode prompt failed");
-        }
+    if (!decode_prompt(tokens)) {
+        return env->NewStringUTF("[error] decode prompt failed");
     }
 
     auto sparams = llama_sampler_chain_default_params();
@@ -156,7 +189,6 @@ Java_com_angamer_pocketlm_native_LlamaBridge_nativeComplete(
     return env->NewStringUTF(out.c_str());
 }
 
-// Streaming: calls TokenCallback.onToken(String) for each piece, then onDone()
 JNIEXPORT void JNICALL
 Java_com_angamer_pocketlm_native_LlamaBridge_nativeCompleteStream(
         JNIEnv *env, jobject /*thiz*/,
@@ -219,16 +251,13 @@ Java_com_angamer_pocketlm_native_LlamaBridge_nativeCompleteStream(
 
     llama_memory_clear(llama_get_memory(g_ctx), true);
 
-    for (int i = 0; i < n; i++) {
-        llama_batch batch = llama_batch_get_one(&tokens[i], 1);
-        if (llama_decode(g_ctx, batch) != 0) {
-            if (onError) {
-                jstring err = env->NewStringUTF("decode prompt failed");
-                env->CallVoidMethod(callback, onError, err);
-                env->DeleteLocalRef(err);
-            }
-            return;
+    if (!decode_prompt(tokens)) {
+        if (onError) {
+            jstring err = env->NewStringUTF("decode prompt failed");
+            env->CallVoidMethod(callback, onError, err);
+            env->DeleteLocalRef(err);
         }
+        return;
     }
 
     auto sparams = llama_sampler_chain_default_params();
