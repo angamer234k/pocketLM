@@ -1,4 +1,5 @@
 #include <jni.h>
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <mutex>
@@ -31,7 +32,6 @@ static void free_model_locked() {
 
 static bool decode_prompt(const std::vector<llama_token> & tokens) {
     if (tokens.empty()) return true;
-    // Batch the full prompt in one decode when possible — much faster than 1-token loops.
     const int n = (int) tokens.size();
     const int n_batch = llama_n_batch(g_ctx);
     int i = 0;
@@ -66,7 +66,6 @@ Java_com_angamer_pocketlm_native_LlamaBridge_nativeLoadModel(
 
     llama_model_params mparams = llama_model_default_params();
     mparams.n_gpu_layers = g_n_gpu_layers;
-    // Prefer mmap for lower RAM pressure on phones.
     mparams.use_mmap = true;
     mparams.use_mlock = false;
 
@@ -84,9 +83,6 @@ Java_com_angamer_pocketlm_native_LlamaBridge_nativeLoadModel(
     cparams.n_ubatch = cparams.n_batch;
     cparams.n_threads = g_n_threads;
     cparams.n_threads_batch = g_n_threads;
-#ifdef LLAMA_FLASH_ATTN_TYPE_AUTO
-    cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
-#endif
 
     g_ctx = llama_init_from_model(g_model, cparams);
     if (!g_ctx) {
@@ -122,7 +118,6 @@ Java_com_angamer_pocketlm_native_LlamaBridge_nativeAbort(JNIEnv *, jobject) {
 
 JNIEXPORT jstring JNICALL
 Java_com_angamer_pocketlm_native_LlamaBridge_nativeBackendInfo(JNIEnv *env, jobject) {
-    // Vulkan is not linked in this build yet; CPU + optional gpu_layers when a GPU backend exists.
     char buf[192];
     snprintf(buf, sizeof(buf), "llama.cpp cpu · threads=%d · gpu_layers=%d · mmap=on",
              g_n_threads, g_n_gpu_layers);
@@ -141,7 +136,7 @@ Java_com_angamer_pocketlm_native_LlamaBridge_nativeComplete(
     g_abort = false;
 
     if (!g_model || !g_ctx) {
-        env->ReleaseStringUTFChars(path_, prompt);
+        env->ReleaseStringUTFChars(prompt_, prompt);
         return env->NewStringUTF("[error] no model loaded");
     }
 
