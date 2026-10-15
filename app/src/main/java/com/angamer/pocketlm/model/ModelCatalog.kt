@@ -92,14 +92,14 @@ object ModelCatalog {
             note = "mid-range phones"
         ),
         CatalogModel(
-            id = "gemma3-1b-litert",
-            name = "Gemma 3 1B (LiteRT)",
-            approxMb = 529,
+            id = "litert-import",
+            name = "LiteRT / MediaPipe model",
+            approxMb = 500,
             url = "",
             filename = "",
             runtime = ModelRuntime.LITERT,
             downloadable = false,
-            note = "LiteRT runtime is not wired yet. Chat still runs on llama.cpp."
+            note = "Import a MediaPipe GenAI .bin/.task model. GGUF still uses llama.cpp."
         )
     )
 }

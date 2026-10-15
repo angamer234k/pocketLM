@@ -22,6 +22,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -32,13 +33,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.angamer.pocketlm.AppPrefs
-import com.angamer.pocketlm.native.LlamaBridge
+import com.angamer.pocketlm.chat.ChatHistory
+import com.angamer.pocketlm.chat.ChatLine
+import com.angamer.pocketlm.native.EngineRouter
 import com.angamer.pocketlm.native.TokenCallback
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-
-data class ChatLine(val id: Long, val role: String, val text: String)
 
 @Composable
 fun ChatScreen(
@@ -50,10 +51,12 @@ fun ChatScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
-    var lines by remember { mutableStateOf<List<ChatLine>>(emptyList()) }
+    val lines by ChatHistory.lines.collectAsState()
     var draft by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     val main = remember { Handler(Looper.getMainLooper()) }
+
+    LaunchedEffect(Unit) { ChatHistory.load(context) }
 
     LaunchedEffect(lines.size) {
         if (lines.isNotEmpty()) listState.animateScrollToItem(lines.lastIndex)
@@ -70,7 +73,7 @@ fun ChatScreen(
         val user = ChatLine(System.nanoTime(), "user", text)
         val replyId = System.nanoTime() + 1
         val history = lines + user
-        lines = history + ChatLine(replyId, "assistant", "")
+        ChatHistory.set(context, history + ChatLine(replyId, "assistant", ""))
         draft = ""
         busy = true
 
@@ -85,12 +88,13 @@ fun ChatScreen(
 
         scope.launch(Dispatchers.IO) {
             try {
-                LlamaBridge.completeStream(prompt, maxTokens, temp, object : TokenCallback {
+                EngineRouter.completeStream(prompt, maxTokens, temp, object : TokenCallback {
                     override fun onToken(token: String) {
                         main.post {
-                            lines = lines.map { line ->
+                            val updated = ChatHistory.lines.value.map { line ->
                                 if (line.id == replyId) line.copy(text = line.text + token) else line
                             }
+                            ChatHistory.set(context, updated)
                         }
                     }
 
@@ -100,9 +104,12 @@ fun ChatScreen(
 
                     override fun onError(message: String) {
                         main.post {
-                            lines = lines.map { line ->
-                                if (line.id == replyId) line.copy(text = line.text.ifBlank { "Error: $message" }) else line
+                            val updated = ChatHistory.lines.value.map { line ->
+                                if (line.id == replyId) {
+                                    line.copy(text = line.text.ifBlank { "Error: $message" })
+                                } else line
                             }
+                            ChatHistory.set(context, updated)
                             busy = false
                         }
                     }
@@ -117,10 +124,25 @@ fun ChatScreen(
     }
 
     Column(modifier = modifier.fillMaxSize().imePadding()) {
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
-            Text(text = "Chat", style = MaterialTheme.typography.headlineSmall)
+        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(text = "Chat", style = MaterialTheme.typography.headlineSmall)
+                if (lines.isNotEmpty()) {
+                    OutlinedButton(onClick = {
+                        ChatHistory.clear(context)
+                    }) { Text("Clear") }
+                }
+            }
             Text(
-                text = if (loaded) "On-device · $modelName · server not required" else "No model loaded",
+                text = if (loaded) {
+                    "On-device · $modelName · ${EngineRouter.backendInfo()}"
+                } else {
+                    "No model loaded"
+                },
                 style = MaterialTheme.typography.bodyMedium
             )
             if (!loaded) {
@@ -170,7 +192,7 @@ fun ChatScreen(
                 maxLines = 4
             )
             if (busy) {
-                OutlinedButton(onClick = { LlamaBridge.abort() }) { Text("Stop") }
+                OutlinedButton(onClick = { EngineRouter.abort() }) { Text("Stop") }
             } else {
                 Button(onClick = { send() }, enabled = draft.isNotBlank()) { Text("Send") }
             }

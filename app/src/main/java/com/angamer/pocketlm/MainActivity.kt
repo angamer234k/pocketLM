@@ -26,7 +26,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
-import com.angamer.pocketlm.native.LlamaBridge
+import com.angamer.pocketlm.native.EngineRouter
 import com.angamer.pocketlm.server.LlmServerService
 import com.angamer.pocketlm.ui.ChatScreen
 import com.angamer.pocketlm.ui.ModelsScreen
@@ -39,7 +39,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.File
 
-private enum class Tab(val label: String) { Chat("Chat"), Models("Models"), Settings("Settings") }
+private enum class Tab { Chat, Models, Settings }
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -71,11 +71,12 @@ class MainActivity : ComponentActivity() {
                                 putExtra(LlmServerService.EXTRA_MODEL_PATH, path)
                                 putExtra(LlmServerService.EXTRA_N_CTX, AppPrefs.nCtx(this@MainActivity))
                                 putExtra(LlmServerService.EXTRA_N_THREADS, AppPrefs.threads(this@MainActivity))
+                                putExtra(LlmServerService.EXTRA_N_GPU_LAYERS, AppPrefs.gpuLayers(this@MainActivity))
                             }
                         )
                     },
                     onUnloadModel = {
-                        LlamaBridge.unloadModel()
+                        EngineRouter.unload()
                         LlmServerService.setLoadedModelName("none")
                     }
                 )
@@ -99,7 +100,7 @@ private fun PocketApp(
 
     LaunchedEffect(tick) {
         while (true) {
-            loaded = LlamaBridge.isLoaded()
+            loaded = EngineRouter.isLoaded()
             modelName = if (loaded) LlmServerService.loadedModelName else "none"
             delay(800)
         }
@@ -138,7 +139,6 @@ private fun PocketApp(
                 UpdateMode.OFF -> {}
             }
         } catch (_: Exception) {
-            // silent on start
         }
     }
 

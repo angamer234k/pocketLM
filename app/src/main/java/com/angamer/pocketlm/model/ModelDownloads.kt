@@ -24,10 +24,6 @@ data class DownloadJob(
     val finishedPath: String? = null
 )
 
-/**
- * Process-wide download state so switching tabs does not reset progress.
- * Uses system [DownloadManager] (no in-app confirm dialog).
- */
 object ModelDownloads {
 
     private val _jobs = MutableStateFlow<List<DownloadJob>>(emptyList())
@@ -41,18 +37,27 @@ object ModelDownloads {
     fun legacyModelsDir(context: Context): File =
         File(context.filesDir, "models").apply { mkdirs() }
 
-    fun allGguf(context: Context): List<File> {
+    private fun isModelFile(name: String): Boolean {
+        val n = name.lowercase()
+        return n.endsWith(".gguf") || n.endsWith(".task") ||
+            n.endsWith(".bin") || n.endsWith(".tflite") || n.endsWith(".litertlm")
+    }
+
+    fun allModels(context: Context): List<File> {
         val seen = linkedSetOf<String>()
         val out = mutableListOf<File>()
         for (dir in listOf(modelsDir(context), legacyModelsDir(context))) {
             dir.listFiles()
-                ?.filter { it.isFile && it.name.endsWith(".gguf", true) }
+                ?.filter { it.isFile && isModelFile(it.name) }
                 ?.forEach { f ->
                     if (seen.add(f.name)) out += f
                 }
         }
         return out.sortedBy { it.name }
     }
+
+    fun allGguf(context: Context): List<File> =
+        allModels(context).filter { it.name.endsWith(".gguf", true) }
 
     fun ensureReceiver(context: Context) {
         if (receiverRegistered) return
@@ -72,10 +77,7 @@ object ModelDownloads {
         val app = context.applicationContext
         val dm = app.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
 
-        // drop finished jobs for same file; allow only one active per filename
-        _jobs.update { list ->
-            list.filterNot { it.filename == filename && !it.running }
-        }
+        _jobs.update { list -> list.filterNot { it.filename == filename && !it.running } }
         if (_jobs.value.any { it.filename == filename && it.running }) {
             return _jobs.value.first { it.filename == filename && it.running }.id
         }
@@ -98,6 +100,26 @@ object ModelDownloads {
         return id
     }
 
+    fun cancel(context: Context, id: Long) {
+        val app = context.applicationContext
+        val dm = app.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+        try {
+            dm.remove(id)
+        } catch (_: Exception) {
+        }
+        _jobs.update { list ->
+            list.map {
+                if (it.id == id && it.running) {
+                    it.copy(running = false, error = "cancelled")
+                } else it
+            }
+        }
+    }
+
+    fun cancelAll(context: Context) {
+        _jobs.value.filter { it.running }.forEach { cancel(context, it.id) }
+    }
+
     fun isActive(filename: String): Boolean =
         _jobs.value.any { it.filename == filename && it.running }
 
@@ -106,8 +128,7 @@ object ModelDownloads {
     fun poll(context: Context) {
         val app = context.applicationContext
         val dm = app.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-        val current = _jobs.value
-        if (current.none { it.running }) return
+        if (_jobs.value.none { it.running }) return
 
         _jobs.update { list ->
             list.map { job ->
@@ -133,12 +154,6 @@ object ModelDownloads {
                 } ?: job
             }
         }
-    }
-
-    fun consumeFinished(): List<DownloadJob> {
-        val done = _jobs.value.filter { !it.running && it.finishedPath != null && it.error == null }
-        // keep them visible briefly; caller may clear
-        return done
     }
 
     fun clearFinished(id: Long) {
